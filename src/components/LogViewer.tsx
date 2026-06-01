@@ -32,6 +32,8 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, onClearLogs }) => {
         return 'bg-pink-500/10 text-pink-400 border border-pink-500/20';
       case 'System':
         return 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20';
+      case 'Rate Limiter':
+        return 'bg-amber-500/10 text-amber-400 border border-amber-500/25';
       default:
         return 'bg-slate-500/10 text-slate-400 border border-slate-500/20';
     }

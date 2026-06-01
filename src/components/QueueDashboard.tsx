@@ -3,44 +3,49 @@ import {
   Play, 
   CheckCircle, 
   AlertTriangle, 
-  Settings, 
-  Cpu, 
-  Database, 
+  Database,  
   History, 
   Activity, 
   Layers, 
   Power, 
-  PowerOff,
-  Clock,
-  Sparkles,
-  RefreshCw,
-  Server
+  Clock, 
+  Sparkles, 
+  RefreshCw, 
+  Server,
+  Trash2,
+  Plus,
+  Flame,
+  LifeBuoy
 } from 'lucide-react';
+
+const API_BASE = `http://${window.location.hostname}:5000/api`;
 
 interface QueueTask {
   id: string;
   displayId: string;
   type: string;
   duration: number;
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'retrying';
   forceFailure: boolean;
   worker: string | null;
+  retries: number;
+  maxRetries: number;
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
-  error?: string;
+  error?: string | null;
 }
 
 interface QueueStatus {
   backlogSize: number;
+  delayedSize: number;
+  dlqSize: number;
   processedCount: number;
   failedCount: number;
-  workers: {
-    'Queue Worker Alpha': 'active' | 'stopped';
-    'Queue Worker Beta': 'active' | 'stopped';
-  };
+  workers: Record<string, 'active' | 'stopped'>;
   pendingTasks: QueueTask[];
   processingTasks: QueueTask[];
+  delayedTasks: QueueTask[];
   history: QueueTask[];
 }
 
@@ -67,6 +72,15 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
   const [forceFailure, setForceFailure] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // New Worker Spawning State
+  const [newWorkerName, setNewWorkerName] = useState('');
+  const [isSpawning, setIsSpawning] = useState(false);
+
+  // DLQ Drawer State
+  const [dlqTasks, setDlqTasks] = useState<QueueTask[]>([]);
+  const [isDlqOpen, setIsDlqOpen] = useState(false);
+  const [isDlqLoading, setIsDlqLoading] = useState(false);
+
   // Dynamic millisecond timer to drive smooth worker progress bars
   const [currentTime, setCurrentTime] = useState(Date.now());
 
@@ -77,21 +91,129 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
     return () => clearInterval(timer);
   }, []);
 
+  // Poll DLQ tasks list when DLQ view is open
+  useEffect(() => {
+    if (isDlqOpen) {
+      fetchDlqTasks();
+    }
+  }, [isDlqOpen]);
+
+  const fetchDlqTasks = async () => {
+    setIsDlqLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/queue/dlq`);
+      const data = await res.json();
+      if (data.success) {
+        setDlqTasks(data.tasks);
+      }
+    } catch (err) {
+      console.error('Failed to fetch DLQ tasks:', err);
+    } finally {
+      setIsDlqLoading(false);
+    }
+  };
+
   const handleEnqueueSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
     try {
       await onEnqueue(taskType, duration, forceFailure);
-      // Reset failure toggle after enqueue
       setForceFailure(false);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const getWorkerClass = (workerName: string) => {
-    if (workerName === 'Queue Worker Alpha') return 'text-violet-400 border-violet-500/20 bg-violet-500/5';
-    return 'text-emerald-400 border-emerald-500/20 bg-emerald-500/5';
+  const handleSpawnWorker = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newWorkerName.trim();
+    if (!name) return;
+    setIsSpawning(true);
+
+    try {
+      const res = await fetch(`${API_BASE}/queue/workers/spawn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workerName: name })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNewWorkerName('');
+        onRefresh();
+      } else {
+        alert(data.error || 'Failed to spawn worker.');
+      }
+    } catch (err) {
+      console.error('Failed to spawn worker:', err);
+    } finally {
+      setIsSpawning(false);
+    }
+  };
+
+  const handleTerminateWorker = async (workerName: string) => {
+    if (!window.confirm(`Are you sure you want to permanently terminate worker "${workerName}"?`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/queue/workers/terminate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workerName })
+      });
+      const data = await res.json();
+      if (data.success) {
+        onRefresh();
+      }
+    } catch (err) {
+      console.error('Failed to terminate worker:', err);
+    }
+  };
+
+  const handleRescueTask = async (taskId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/queue/dlq/reenqueue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchDlqTasks();
+        onRefresh();
+      }
+    } catch (err) {
+      console.error('Failed to rescue task:', err);
+    }
+  };
+
+  const handlePurgeDlq = async () => {
+    if (!window.confirm('Are you sure you want to completely purge the Dead Letter Queue?')) {
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/queue/dlq`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        fetchDlqTasks();
+        onRefresh();
+      }
+    } catch (err) {
+      console.error('Failed to purge DLQ:', err);
+    }
+  };
+
+  // Generate unique color classes for dynamic workers based on name hash
+  const getWorkerColorClasses = (name: string) => {
+    const hash = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    const colors = [
+      'text-violet-400 border-violet-500/20 bg-violet-500/5',
+      'text-emerald-400 border-emerald-500/20 bg-emerald-500/5',
+      'text-cyan-400 border-cyan-500/20 bg-cyan-500/5',
+      'text-pink-400 border-pink-500/20 bg-pink-500/5',
+      'text-amber-400 border-amber-500/20 bg-amber-500/5',
+      'text-orange-400 border-orange-500/20 bg-orange-500/5'
+    ];
+    return colors[hash % colors.length];
   };
 
   const getWorkerStatusBadge = (state: 'active' | 'stopped') => {
@@ -105,8 +227,8 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
     }
     return (
       <span className="flex items-center gap-1 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800 text-slate-500">
-        <PowerOff size={10} />
-        STOPPED
+        <Power size={10} className="rotate-180" />
+        PAUSED
       </span>
     );
   };
@@ -180,7 +302,7 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
                   <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
                     <AlertTriangle size={13} className="text-amber-500" /> Simulate Task Failure
                   </span>
-                  <p className="text-[10px] text-slate-500">Forces the worker to mark this job as failed</p>
+                  <p className="text-[10px] text-slate-500">Forces exponential retries & eventual DLQ routing</p>
                 </div>
                 <input
                   type="checkbox"
@@ -207,186 +329,227 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
           </div>
         </div>
 
-        {/* Workers Arena & Dynamic Load Balancing */}
+        {/* Dynamic Worker Pool Scaling Panel */}
         <div className="lg:col-span-7 space-y-4">
-          <div className="flex justify-between items-center px-1">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-1">
             <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <Server size={14} className="text-slate-500" /> Active Redis Queue Workers
+              <Server size={14} className="text-slate-500" /> Elastic Worker Pool Manager
             </h3>
-            <button 
-              onClick={onRefresh}
-              className="p-1 hover:bg-slate-800 rounded-md text-slate-400 hover:text-slate-200 transition-colors"
-              title="Refresh queue state"
-            >
-              <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
-            </button>
+
+            {/* Spawner Inline Form */}
+            <form onSubmit={handleSpawnWorker} className="flex gap-2 shrink-0">
+              <input
+                type="text"
+                value={newWorkerName}
+                onChange={(e) => setNewWorkerName(e.target.value)}
+                placeholder="Worker Gamma..."
+                className="bg-slate-950/80 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50 font-mono w-32"
+              />
+              <button
+                type="submit"
+                disabled={isSpawning || !newWorkerName.trim()}
+                className="flex items-center gap-1 px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-xs font-bold font-mono transition shadow-lg shadow-indigo-500/10 disabled:opacity-40"
+              >
+                <Plus size={12} /> Spawn
+              </button>
+              <button 
+                type="button"
+                onClick={onRefresh}
+                className="p-1.5 border border-slate-800 bg-slate-950/60 hover:bg-slate-900 rounded-lg text-slate-400 hover:text-slate-200 transition"
+              >
+                <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+              </button>
+            </form>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {status && Object.entries(status.workers).map(([workerName, workerState]) => {
-              // Check if worker is processing a task
-              const activeTask = status.processingTasks.find(t => t.worker === workerName);
-              
-              // Calculate smooth progress
-              let progressPercent = 0;
-              let elapsedSec = 0;
-              if (activeTask && activeTask.startedAt) {
-                const elapsedMs = currentTime - activeTask.startedAt;
-                elapsedSec = Math.floor(elapsedMs / 1000);
-                progressPercent = Math.min(100, (elapsedMs / (activeTask.duration * 1000)) * 100);
-              }
+          {/* Grid of Dynamic Workers */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[295px] overflow-y-auto pr-1 custom-scrollbar">
+            {status && Object.entries(status.workers).length === 0 ? (
+              <div className="col-span-2 text-center py-10 border-2 border-dashed border-slate-900 rounded-2xl bg-slate-950/30 text-slate-500 text-xs">
+                No active workers. Enqueued tasks will pile up in the backlog list!
+              </div>
+            ) : (
+              status && Object.entries(status.workers).map(([workerName, workerState]) => {
+                // Find if worker is currently processing a task
+                const activeTask = status.processingTasks.find(t => t.worker === workerName);
+                const colorClasses = getWorkerColorClasses(workerName);
+                
+                // Calculate processing progress
+                let progressPercent = 0;
+                let elapsedSec = 0;
+                if (activeTask && activeTask.startedAt) {
+                  const elapsedMs = currentTime - activeTask.startedAt;
+                  elapsedSec = Math.floor(elapsedMs / 1000);
+                  progressPercent = Math.min(100, (elapsedMs / (activeTask.duration * 1000)) * 100);
+                }
 
-              return (
-                <div 
-                  key={workerName}
-                  className={`glass-panel p-5 rounded-2xl border transition-all duration-300 relative overflow-hidden flex flex-col justify-between min-h-[220px] ${
-                    activeTask ? 'border-indigo-500/40 bg-indigo-500/5 shadow-[0_0_20px_rgba(99,102,241,0.08)]' : 
-                    workerState === 'stopped' ? 'border-slate-900 opacity-60' : 'border-slate-800'
-                  }`}
-                >
-                  {/* Decorative background glow for active workers */}
-                  {activeTask && (
-                    <div className="absolute -top-12 -right-12 w-28 h-28 bg-indigo-500/10 rounded-full blur-2xl animate-pulse" />
-                  )}
+                return (
+                  <div 
+                    key={workerName}
+                    className={`glass-panel p-4.5 rounded-2xl border transition-all duration-300 relative overflow-hidden flex flex-col justify-between min-h-[200px] ${
+                      activeTask ? 'border-indigo-500/40 bg-indigo-500/5 shadow-[0_0_20px_rgba(99,102,241,0.06)]' : 
+                      workerState === 'stopped' ? 'border-slate-900 opacity-60' : 'border-slate-800'
+                    }`}
+                  >
+                    {/* Glow layer */}
+                    {activeTask && (
+                      <div className="absolute -top-12 -right-12 w-24 h-24 bg-indigo-500/5 rounded-full blur-2xl animate-pulse" />
+                    )}
 
-                  {/* Worker Header */}
-                  <div>
-                    <div className="flex justify-between items-start gap-4 mb-2">
-                      <span className="font-mono text-xs text-indigo-400/80 font-bold tracking-wider">
-                        {workerName === 'Queue Worker Alpha' ? 'CORE_WORKER_01' : 'CORE_WORKER_02'}
-                      </span>
-                      {getWorkerStatusBadge(workerState)}
+                    {/* Header */}
+                    <div>
+                      <div className="flex justify-between items-start gap-4 mb-2">
+                        <span className={`font-mono text-[9px] font-bold tracking-widest px-1.5 py-0.5 rounded border uppercase ${colorClasses}`}>
+                          {workerName}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {getWorkerStatusBadge(workerState)}
+                          <button
+                            onClick={() => handleTerminateWorker(workerName)}
+                            className="p-1 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-md transition"
+                            title="Terminate Worker permanently"
+                          >
+                            <Trash2 size={11} />
+                          </button>
+                        </div>
+                      </div>
                     </div>
 
-                    <h4 className="text-base font-bold text-slate-100 flex items-center gap-1.5">
-                      <Cpu size={16} className={activeTask ? 'text-indigo-400 animate-spin' : 'text-slate-400'} />
-                      {workerName}
-                    </h4>
-                  </div>
-
-                  {/* Worker Processing Area */}
-                  <div className="my-4">
-                    {workerState === 'stopped' ? (
-                      <div className="text-center py-4 border border-dashed border-slate-900 rounded-xl bg-slate-950/30 text-slate-500 text-xs">
-                        Worker is Offline. Backlog items will wait.
-                      </div>
-                    ) : activeTask ? (
-                      <div className="space-y-2.5">
-                        <div className="flex justify-between items-start text-xs">
-                          <div>
-                            <span className="text-[10px] font-mono text-indigo-400 font-bold bg-indigo-500/10 px-1.5 py-0.5 rounded mr-1.5">
-                              #{activeTask.displayId}
+                    {/* Progress details */}
+                    <div className="my-3">
+                      {workerState === 'stopped' ? (
+                        <div className="text-center py-3 border border-dashed border-slate-900 rounded-xl bg-slate-950/20 text-slate-500 text-xs">
+                          Worker is paused.
+                        </div>
+                      ) : activeTask ? (
+                        <div className="space-y-2">
+                          <div className="flex justify-between items-start text-xs">
+                            <div className="truncate max-w-[120px]">
+                              <span className="text-[9px] font-mono text-indigo-400 font-bold bg-indigo-500/10 px-1.5 py-0.5 rounded mr-1.5">
+                                #{activeTask.displayId}
+                              </span>
+                              <span className="text-slate-200 font-medium">{activeTask.type}</span>
+                            </div>
+                            <span className="text-slate-400 font-mono text-[9px] shrink-0">
+                              {elapsedSec}s / {activeTask.duration}s
                             </span>
-                            <span className="text-slate-200 font-semibold">{activeTask.type}</span>
                           </div>
-                          <span className="text-slate-400 font-mono text-[10px]">
-                            {elapsedSec}s / {activeTask.duration}s
-                          </span>
-                        </div>
 
-                        {/* Progress Bar Container */}
-                        <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-900">
-                          <div 
-                            className="bg-gradient-to-r from-indigo-500 to-indigo-400 h-full rounded-full transition-all duration-100 ease-linear shadow-[0_0_10px_rgba(99,102,241,0.5)]"
-                            style={{ width: `${progressPercent}%` }}
-                          />
+                          <div className="w-full bg-slate-950 h-1.5 rounded-full overflow-hidden border border-slate-900">
+                            <div 
+                              className="bg-gradient-to-r from-indigo-500 to-indigo-400 h-full rounded-full transition-all duration-100 ease-linear shadow-[0_0_10px_rgba(99,102,241,0.4)]"
+                              style={{ width: `${progressPercent}%` }}
+                            />
+                          </div>
                         </div>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2 text-xs text-slate-400 italic py-4 border border-dashed border-slate-900/60 rounded-xl bg-slate-950/20 px-3">
-                        <span className="w-2.5 h-2.5 bg-slate-600 rounded-full animate-ping mr-1" />
-                        Waiting for enqueued tasks...
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Worker Footer Toggle Switch */}
-                  <div className="pt-3 border-t border-slate-900 flex justify-between items-center text-xs">
-                    <span className="text-slate-500 font-mono">Control Switch:</span>
-                    <button
-                      onClick={() => onToggleWorker(workerName, workerState === 'active' ? 'stopped' : 'active')}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-semibold font-mono text-[11px] transition-all shadow-md active:scale-95 ${
-                        workerState === 'active' 
-                          ? 'border-rose-500/20 hover:border-rose-500/40 text-rose-400 hover:bg-rose-500/5' 
-                          : 'border-emerald-500/20 hover:border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/5'
-                      }`}
-                    >
-                      {workerState === 'active' ? (
-                        <>
-                          <Power size={12} />
-                          STOP WORKER
-                        </>
                       ) : (
-                        <>
-                          <Power size={12} />
-                          START WORKER
-                        </>
+                        <div className="flex items-center gap-2 text-xs text-slate-400 italic py-3 border border-dashed border-slate-900/60 rounded-xl bg-slate-950/20 px-3">
+                          <span className="w-2 h-2 bg-slate-600 rounded-full animate-ping mr-1" />
+                          Polling backlog...
+                        </div>
                       )}
-                    </button>
+                    </div>
+
+                    {/* Controls */}
+                    <div className="pt-2 border-t border-slate-900 flex justify-between items-center text-xs">
+                      <span className="text-slate-500 font-mono text-[10px]">Worker loop:</span>
+                      <button
+                        onClick={() => onToggleWorker(workerName, workerState === 'active' ? 'stopped' : 'active')}
+                        className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border font-semibold font-mono text-[10px] transition-all shadow-md active:scale-95 ${
+                          workerState === 'active' 
+                            ? 'border-rose-500/25 text-rose-400 hover:bg-rose-500/5' 
+                            : 'border-emerald-500/25 text-emerald-400 hover:bg-emerald-500/5'
+                        }`}
+                      >
+                        {workerState === 'active' ? 'PAUSE' : 'RESUME'}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </div>
 
       </div>
 
       {/* 2. Real-time Metric counters */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         {/* Backlog Metric */}
-        <div className="glass-panel p-5 rounded-2xl relative overflow-hidden flex flex-col justify-between">
-          <div className="flex items-center gap-2.5 text-indigo-400 mb-2">
-            <Layers size={18} />
-            <h3 className="font-semibold text-xs uppercase tracking-wider text-slate-300">Queue Backlog</h3>
+        <div className="glass-panel p-4.5 rounded-2xl flex flex-col justify-between">
+          <div className="flex items-center gap-2 text-indigo-400 mb-2">
+            <Layers size={16} />
+            <h3 className="font-semibold text-[10px] uppercase tracking-wider text-slate-300">Backlog</h3>
           </div>
-          <div className="flex justify-between items-baseline mt-2">
-            <span className={`text-3xl font-black font-mono tracking-tight ${status && status.backlogSize > 0 ? 'text-indigo-400 animate-pulse' : 'text-slate-400'}`}>
+          <div className="flex justify-between items-baseline mt-1">
+            <span className={`text-2xl font-black font-mono tracking-tight ${status && status.backlogSize > 0 ? 'text-indigo-400 animate-pulse' : 'text-slate-400'}`}>
               {status ? status.backlogSize : 0}
             </span>
-            <span className="text-[10px] text-slate-500 font-mono">Tasks Waiting</span>
+            <span className="text-[9px] text-slate-500 font-mono">Pending</span>
           </div>
         </div>
+
+        {/* Retry Queue Metric */}
+        <div className="glass-panel p-4.5 rounded-2xl flex flex-col justify-between">
+          <div className="flex items-center gap-2 text-amber-400 mb-2">
+            <Clock size={16} />
+            <h3 className="font-semibold text-[10px] uppercase tracking-wider text-slate-300">Retrying</h3>
+          </div>
+          <div className="flex justify-between items-baseline mt-1">
+            <span className={`text-2xl font-black font-mono tracking-tight ${status && status.delayedSize > 0 ? 'text-amber-400' : 'text-slate-400'}`}>
+              {status ? status.delayedSize : 0}
+            </span>
+            <span className="text-[9px] text-slate-500 font-mono">Backoff Delay</span>
+          </div>
+        </div>
+
+        {/* Dead Letter Queue (DLQ) Drawer Button Card */}
+        <button
+          onClick={() => setIsDlqOpen(true)}
+          className={`glass-panel p-4.5 rounded-2xl flex flex-col justify-between text-left transition-all duration-300 hover:border-red-500/30 hover:bg-red-500/5 active:scale-95 group relative ${
+            status && status.dlqSize > 0 ? 'border-red-500/20 bg-red-500/5 shadow-[0_0_15px_rgba(239,68,68,0.06)]' : ''
+          }`}
+        >
+          {status && status.dlqSize > 0 && (
+            <span className="absolute top-2 right-2 w-1.5 h-1.5 bg-red-500 rounded-full animate-ping" />
+          )}
+          <div className={`flex items-center gap-2 mb-2 transition-colors ${status && status.dlqSize > 0 ? 'text-red-400' : 'text-slate-400 group-hover:text-red-400'}`}>
+            <Flame size={16} />
+            <h3 className="font-semibold text-[10px] uppercase tracking-wider text-slate-300">DLQ Backlog</h3>
+          </div>
+          <div className="flex justify-between items-baseline mt-1 w-full">
+            <span className={`text-2xl font-black font-mono tracking-tight ${status && status.dlqSize > 0 ? 'text-red-400' : 'text-slate-400'}`}>
+              {status ? status.dlqSize : 0}
+            </span>
+            <span className="text-[9px] text-slate-500 font-mono font-bold hover:underline">Click to Open</span>
+          </div>
+        </button>
 
         {/* Completed Metric */}
-        <div className="glass-panel p-5 rounded-2xl relative overflow-hidden flex flex-col justify-between">
-          <div className="flex items-center gap-2.5 text-emerald-400 mb-2">
-            <CheckCircle size={18} />
-            <h3 className="font-semibold text-xs uppercase tracking-wider text-slate-300">Completed Jobs</h3>
+        <div className="glass-panel p-4.5 rounded-2xl flex flex-col justify-between">
+          <div className="flex items-center gap-2 text-emerald-400 mb-2">
+            <CheckCircle size={16} />
+            <h3 className="font-semibold text-[10px] uppercase tracking-wider text-slate-300">Completed</h3>
           </div>
-          <div className="flex justify-between items-baseline mt-2">
-            <span className="text-3xl font-black font-mono tracking-tight text-emerald-400">
+          <div className="flex justify-between items-baseline mt-1">
+            <span className="text-2xl font-black font-mono tracking-tight text-emerald-400">
               {status ? status.processedCount : 0}
             </span>
-            <span className="text-[10px] text-slate-500 font-mono">Tasks Finished</span>
-          </div>
-        </div>
-
-        {/* Failed Metric */}
-        <div className="glass-panel p-5 rounded-2xl relative overflow-hidden flex flex-col justify-between">
-          <div className="flex items-center gap-2.5 text-rose-400 mb-2">
-            <AlertTriangle size={18} />
-            <h3 className="font-semibold text-xs uppercase tracking-wider text-slate-300">Failed Jobs</h3>
-          </div>
-          <div className="flex justify-between items-baseline mt-2">
-            <span className="text-3xl font-black font-mono tracking-tight text-rose-400">
-              {status ? status.failedCount : 0}
-            </span>
-            <span className="text-[10px] text-slate-500 font-mono">Error Failures</span>
+            <span className="text-[9px] text-slate-500 font-mono">Success Finished</span>
           </div>
         </div>
 
         {/* Total Throughput */}
-        <div className="glass-panel p-5 rounded-2xl relative overflow-hidden flex flex-col justify-between">
-          <div className="flex items-center gap-2.5 text-cyan-400 mb-2">
-            <Activity size={18} />
-            <h3 className="font-semibold text-xs uppercase tracking-wider text-slate-300">Queue Throughput</h3>
+        <div className="glass-panel p-4.5 rounded-2xl flex flex-col justify-between">
+          <div className="flex items-center gap-2 text-cyan-400 mb-2">
+            <Activity size={16} />
+            <h3 className="font-semibold text-[10px] uppercase tracking-wider text-slate-300">Throughput</h3>
           </div>
-          <div className="flex justify-between items-baseline mt-2">
-            <span className="text-3xl font-black font-mono tracking-tight text-cyan-400">
+          <div className="flex justify-between items-baseline mt-1">
+            <span className="text-2xl font-black font-mono tracking-tight text-cyan-400">
               {status ? (status.processedCount + status.failedCount) : 0}
             </span>
-            <span className="text-[10px] text-slate-500 font-mono">Total Processed</span>
+            <span className="text-[9px] text-slate-500 font-mono">Total Runs</span>
           </div>
         </div>
       </div>
@@ -401,13 +564,36 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
               <Database size={16} />
             </div>
             <div>
-              <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-200">Redis List (FIFO Queue)</h3>
-              <p className="text-[10px] text-slate-500 font-mono">Key: queue:tasks</p>
+              <h3 className="font-semibold text-sm uppercase tracking-wider text-slate-200">Active Queue Pipeline</h3>
+              <p className="text-[10px] text-slate-500 font-mono">FIFO list • queue:tasks</p>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto pr-1 space-y-3">
-            {!status || status.pendingTasks.length === 0 ? (
+          <div className="flex-1 overflow-y-auto pr-1 space-y-3 custom-scrollbar">
+            {/* Show delayed tasks first (if any) */}
+            {status && status.delayedTasks.length > 0 && (
+              <div className="space-y-2 border-b border-slate-900 pb-3">
+                <span className="text-[9px] font-bold text-amber-400 uppercase tracking-widest font-mono">Delayed Retries:</span>
+                {status.delayedTasks.map((task) => (
+                  <div key={task.id} className="bg-amber-500/5 border border-amber-500/10 p-3 rounded-xl flex justify-between items-center relative overflow-hidden">
+                    <div className="absolute top-0 bottom-0 left-0 w-1 bg-amber-500" />
+                    <div className="pl-1.5 space-y-0.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] font-mono font-bold text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                          #{task.displayId}
+                        </span>
+                        <span className="text-xs font-bold text-slate-300">{task.type}</span>
+                      </div>
+                      <p className="text-[9px] font-mono text-amber-500 flex items-center gap-1">
+                        <Clock size={8} /> Exponential Backoff Retry (Attempt {task.retries}/3)
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!status || (status.pendingTasks.length === 0 && status.delayedTasks.length === 0) ? (
               <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-6 border-2 border-dashed border-slate-900 rounded-xl">
                 <Database size={24} className="text-slate-700 mb-2" />
                 <p className="text-xs font-semibold text-slate-400">List is Empty</p>
@@ -434,7 +620,7 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
                     </div>
                   </div>
                   <span className="text-[10px] font-mono text-slate-500 font-bold bg-slate-900 border border-slate-800 px-2 py-0.5 rounded-md uppercase">
-                    Queue Position #{status.pendingTasks.length - index}
+                    Pos #{status.pendingTasks.length - index}
                   </span>
                 </div>
               ))
@@ -465,7 +651,7 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
             )}
           </div>
 
-          <div className="flex-1 overflow-y-auto pr-1 space-y-3">
+          <div className="flex-1 overflow-y-auto pr-1 space-y-3 custom-scrollbar">
             {!status || status.history.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-slate-500 text-center p-6 border-2 border-dashed border-slate-900 rounded-xl">
                 <History size={24} className="text-slate-700 mb-2" />
@@ -482,7 +668,6 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
                     task.status === 'completed' ? 'border-emerald-500/10' : 'border-rose-500/10'
                   }`}
                 >
-                  {/* Decorative side accent */}
                   <div className={`absolute top-0 bottom-0 left-0 w-1 ${
                     task.status === 'completed' ? 'bg-emerald-500/40' : 'bg-rose-500/40'
                   }`} />
@@ -500,7 +685,7 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
                         <span className="text-slate-600">|</span>
                         <span>Finished: {task.finishedAt ? formatTime(task.finishedAt) : ''}</span>
                         <span className="text-slate-600">|</span>
-                        <span>Worker: <b className={getWorkerClass(task.worker || '')}>{task.worker}</b></span>
+                        <span>Worker: <b className={getWorkerColorClasses(task.worker || '')}>{task.worker}</b></span>
                       </div>
                     </div>
 
@@ -509,7 +694,7 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
                         ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-400' 
                         : 'border-rose-500/20 bg-rose-500/10 text-rose-400'
                     }`}>
-                      {task.status}
+                    {task.status === 'failed' ? 'perm failed' : task.status}
                     </span>
                   </div>
 
@@ -525,6 +710,101 @@ const QueueDashboard: React.FC<QueueDashboardProps> = ({
         </div>
 
       </div>
+
+      {/* ==========================================
+          DEAD LETTER QUEUE (DLQ) DRAWER MODAL
+          ========================================== */}
+      {isDlqOpen && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn">
+          <div className="glass-panel w-full max-w-2xl rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh] border border-red-500/15">
+            {/* Header */}
+            <div className="p-6 border-b border-slate-900 bg-red-950/10 flex justify-between items-center shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-red-500/15 border border-red-500/20 rounded-xl text-red-400">
+                  <Flame size={20} className="animate-pulse" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-lg text-slate-100 flex items-center gap-2">
+                    Dead Letter Queue (DLQ) Inspector
+                  </h3>
+                  <p className="text-xs text-slate-400">Inspect failed payloads representing permanent task crashes.</p>
+                </div>
+              </div>
+
+              {dlqTasks.length > 0 && (
+                <button
+                  onClick={handlePurgeDlq}
+                  className="flex items-center gap-1 text-[10px] font-mono text-red-400 hover:bg-red-500/10 px-2.5 py-1.5 rounded-lg border border-red-500/20 hover:border-red-500/40 transition active:scale-95"
+                >
+                  <Trash2 size={10} /> Purge DLQ
+                </button>
+              )}
+            </div>
+
+            {/* Tasks List */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar min-h-[300px]">
+              {isDlqLoading ? (
+                <div className="h-full flex items-center justify-center py-20">
+                  <RefreshCw size={24} className="text-red-400 animate-spin" />
+                </div>
+              ) : dlqTasks.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center py-20 text-slate-500 text-center gap-2 border-2 border-dashed border-slate-900 rounded-xl">
+                  <LifeBuoy size={32} className="text-slate-700 animate-bounce" />
+                  <h4 className="text-xs font-bold text-slate-300">Clean Slate — DLQ is Empty</h4>
+                  <p className="text-[10px] text-slate-500 max-w-[250px] mx-auto mt-0.5">
+                    No tasks have permanently crashed. Run failures in the Sandbox to trigger DLQ logging.
+                  </p>
+                </div>
+              ) : (
+                dlqTasks.map((task) => (
+                  <div 
+                    key={task.id}
+                    className="bg-slate-950 border border-red-500/10 p-4 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4 relative overflow-hidden hover:border-red-500/20 transition"
+                  >
+                    <div className="absolute top-0 bottom-0 left-0 w-1 bg-red-500" />
+                    
+                    <div className="pl-2.5 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono font-bold text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded">
+                          #{task.displayId}
+                        </span>
+                        <span className="text-sm font-bold text-slate-200">{task.type}</span>
+                      </div>
+                      <div className="text-[9.5px] text-slate-400 font-mono space-x-3">
+                        <span>Duration: <b>{task.duration}s</b></span>
+                        <span>•</span>
+                        <span>Retries: <b>{task.retries}/3</b></span>
+                        <span>•</span>
+                        <span>Crashed: {formatTime(task.finishedAt || Date.now())}</span>
+                      </div>
+                      <div className="text-[10px] text-red-400/90 bg-red-500/5 border border-red-500/10 p-2 rounded-lg font-mono mt-2">
+                        🚨 Exception: {task.error}
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleRescueTask(task.id)}
+                      className="shrink-0 flex items-center justify-center gap-1.5 px-4 py-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 border border-emerald-400/20 text-white rounded-xl text-xs font-bold transition shadow-lg shadow-emerald-500/10 active:scale-95"
+                    >
+                      <LifeBuoy size={12} className="animate-spin-slow" /> Rescue & Retry
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-slate-900 bg-slate-950 shrink-0 text-right">
+              <button
+                onClick={() => setIsDlqOpen(false)}
+                className="px-4 py-2 border border-slate-800 hover:border-slate-700 hover:bg-slate-900/60 rounded-xl text-xs font-semibold text-slate-300 transition"
+              >
+                Close Inspector
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
